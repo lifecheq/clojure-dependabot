@@ -34,6 +34,7 @@ do
         mv pom.xml projectclj/
         maven-dependency-submission-linux-x64 --token "$GITHUB_TOKEN" --repository "$GITHUB_REPOSITORY" --branch-ref "$GITHUB_REF" --sha "$GITHUB_SHA" --directory "${cljdir}/projectclj" --job-name "${INPUT_DIRECTORY}${i}/projectclj"
     else
+        set -euxo pipefail
         echo "!!!!!!!!!!!!!! INPUT VARIABLES !!!!!!!!!!!!!!!!!!!!!"
         echo "GITHUB_REPOSITORY: ${GITHUB_REPOSITORY}"
         echo "GITHUB_REF: ${GITHUB_REF}"
@@ -41,16 +42,19 @@ do
         # just a bit of hackery to get just the "utwig" out of "lifecheq/utwig"
         s="/${GITHUB_REPOSITORY}"
         repo="${s##/*/}"
-      
-        mkdir pom-generator
-        cp /pom_generator.clj /github/workspace/pom-generator/pom_generator.clj
+
+        # FIXME: project-specific
         clojure -X:deps prep
         clojure -A:app -Strace
 
-        clojure -Sdeps \{\:deps\ \{org.clojure/tools.deps\ \{\:mvn/version\ \"0.22.1492\"\}\ org.clojure/data.xml\ \{\:mvn/version\ \"0.0.8\"\}\}\ \:paths\ \[\"pom-generator\"\]\} -X pom-generator/generate-pom :repository \"$repo\"
-        
-        mkdir depsedn
+	mv deps.edn project.deps.edn
+        cp /pom_generator.clj /deps.edn .
+        clojure -X pom-generator/generate-pom :repository \"$repo\"
+	mv project.deps.edn deps.edn
+
+	mkdir depsedn
         mv pom.xml depsedn/
+        stat depsedn/pom.xml
         maven-dependency-submission-linux-x64 --token "$GITHUB_TOKEN" --repository "$GITHUB_REPOSITORY" --branch-ref "$GITHUB_REF" --sha "$GITHUB_SHA" --directory "${cljdir}/depsedn" --job-name "${INPUT_DIRECTORY}${i}/depsedn"
     fi
 done

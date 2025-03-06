@@ -2,24 +2,30 @@
   (:require [clojure.data.xml :as xml]
             [clojure.tools.deps.tree :as tree]))
 
-(defn effective-deps []
-    (let [trace (read-string (slurp "trace.edn"))
-          tree  (tree/trace->tree trace)]
-      (->> tree
-           (tree-seq :children (fn [{:keys [children]}]
-                                 (map
-                                  (fn [k v]
-                                    (assoc v :name k))
-                                  (keys children)
-                                  (vals children))))
-           (rest)
-           (map #(dissoc % :children))
-           (remove #(-> % :coord :git/url))
-           (filter :include))))
+(defn children [deps-node]
+  (rest (tree-seq :children
+                  (fn [{:keys [children]}]
+                    (map (fn [[k v]] (assoc v :name k)) children))
+                  deps-node)))
+
+(defn- exclude-children [deps-node]
+  #_(when (= 'io.xapix/paos (:name deps-node))
+      (tap> {:deps-node deps-node
+             :exclusions (map :name (children deps-node))}))
+  (-> deps-node
+      (update-in [:coord :exclusions] into (keys (:children deps-node)))
+      (dissoc :children)))
+
+(defn effective-deps [trace]
+  (let [tree (tree/trace->tree trace)]
+    (->> (children tree)
+         (map exclude-children)
+         (remove #(-> % :coord :git/url))
+         (filter :include))))
 
 (defn exclusion-element [exclusion]
   (xml/element :exclusion {}
-               (xml/element :groupId {} (str (namespace exclusion)))
+               (xml/element :groupId {} (namespace exclusion))
                (xml/element :artifactId {} (str (name exclusion)))))
 
 (defn deps->pom [deps repository destination]
@@ -37,13 +43,12 @@
                  :dependencies {}
                  (for [{dep-name :lib :as dep} deps]
                    (xml/element
-                     :dependency {}
-                     (xml/element :groupId {} (str (namespace dep-name)))
-                     (xml/element :artifactId {} (str (name dep-name)))
-                     (xml/element :version {} (str (-> dep :coord :mvn/version)))
-                     (when-let [exclusions (-> dep :coord :exclusions)]
-                       (xml/element :exclusions {}
-                                    (map exclusion-element exclusions))))))
+                    :dependency {}
+                    (xml/element :groupId {} (namespace dep-name))
+                    (xml/element :artifactId {} (str (name dep-name)))
+                    (xml/element :version {} (str (-> dep :coord :mvn/version)))
+                    (when-let [exclusions (-> dep :coord :exclusions)]
+                      (xml/element :exclusions {} (map exclusion-element exclusions))))))
 
                (xml/element :build {}
                             (xml/element :sourceDirectory {} "src-shared"))
@@ -65,25 +70,29 @@
                    (xml/element :id {} "jboss")
                    (xml/element :url {} "https://repository.jboss.org/maven2"))
 
-                 ))]
+                 ))
+        xml-str (xml/indent-str tags)]
 
-    (with-open [out-file (java.io.FileWriter. destination)]
-      (xml/emit tags out-file))))
+    (println xml-str)
+    (spit destination xml-str)))
 
-(defn generate-pom [{:keys [repository]}]
-  (->
-   (effective-deps)
-   (deps->pom repository "pom.xml")))
+(defn generate-pom [{:keys [repository trace-path]
+                     :or {trace-path "trace.edn"}}]
+  (-> (effective-deps (read-string (slurp trace-path)))
+      (deps->pom repository "pom.xml")))
 
+#_{:clj-kondo/ignore [:unresolved-namespace]}
 (comment
+  (clojure.repl.deps/add-lib 'djblue/portal {:mvn/version "RELEASE"})
+  (map :name (children (tree/trace->tree (read-string (slurp "../utwig/trace.edn")))))
+  (effective-deps (read-string (slurp "../utwig/trace.edn")))
+  (generate-pom {:repository "utwig" :trace-path "../utwig/trace.edn" })
   ;; Testing this is relatively easy:
   ;; copy this file into utwig/pom-generator/pom_generator.clj (or whichever project you want)
   ;; (so - pom-generator is in the same level as src, src-shared etc.)
   ;; in terminal (in the root directory of the project) run:
-  ;; clojure -X:deps prep
-  ;; clojure -A:app -Strace
-  ;; ^ these generate a trace.edn file
-  ;; then execute (replace $GITHUB_REPOSITORY with some text you like
-  ;;       clojure -Sdeps \{\:deps\ \{org.clojure/tools.deps\ \{\:mvn/version\ \"0.22.1492\"\}\ org.clojure/data.xml\ \{\:mvn/version\ \"0.0.8\"\}\}\ \:paths\ \[\"pom-generator\"\]\} -X pom-generator/generate-pom :repository \"$GITHUB_REPOSITORY\"
-  
+  ;; Generate a trace file in utwig using
+  ;;     clojure -X:deps prep
+  ;;     clojure -A:app -Strace
+  ;; Then run the generate-pom form
   :.)

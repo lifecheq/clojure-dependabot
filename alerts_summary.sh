@@ -1,5 +1,7 @@
 #!/bin/bash
 
+set -euxo pipefail
+
 dependency_tree_summary () {
     mvn -ntp dependency:tree -Dverbose=true -DoutputFile="dependency-tree.txt"
     if [[ "$INPUT_VERBOSE" == true ]]; then
