@@ -39,7 +39,6 @@ do
         echo "GITHUB_REPOSITORY: ${GITHUB_REPOSITORY}"
         echo "GITHUB_REF: ${GITHUB_REF}"
 
-        # just a bit of hackery to get just the "utwig" out of "lifecheq/utwig"
         s="/${GITHUB_REPOSITORY}"
         repo="${s##/*/}"
 

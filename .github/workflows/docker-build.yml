@@ -7,9 +7,6 @@ on:
   push:
     branches:
       - main
-  # utwig only consumes this action on a nightly cron, so a base image that
-  # rots out from under us stays invisible until someone reads the Dependabot
-  # alerts and wonders why they never change. Build it on a schedule too.
   schedule:
     - cron: "0 6 * * 1"
   workflow_dispatch:
