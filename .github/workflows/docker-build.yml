@@ -1,0 +1,39 @@
+name: "Docker image"
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+  # utwig only consumes this action on a nightly cron, so a base image that
+  # rots out from under us stays invisible until someone reads the Dependabot
+  # alerts and wonders why they never change. Build it on a schedule too.
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build the action image
+        run: docker build -t clojure-dependabot:ci .
+
+      - name: Check the tools the scripts call are all present
+        run: |
+          docker run --rm --entrypoint /bin/bash clojure-dependabot:ci -c '
+            set -euo pipefail
+            for cmd in clojure curl gh git jq lein mvn ssh-keyscan \
+                       maven-dependency-submission-linux-x64; do
+              command -v "$cmd" > /dev/null || { echo "missing: $cmd"; exit 1; }
+            done
+            mvn -v
+            clojure --version
+            gh --version
+          '
