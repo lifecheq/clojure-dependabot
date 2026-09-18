@@ -47,6 +47,11 @@
                     (xml/element :groupId {} (namespace dep-name))
                     (xml/element :artifactId {} (str (name dep-name)))
                     (xml/element :version {} (str (-> dep :coord :mvn/version)))
+                    ;; Some artifacts (junixsocket-core, for one) publish only a
+                    ;; pom. Without an explicit type Maven hunts for a jar that
+                    ;; was never released and dependency:tree blows up.
+                    (when-let [extension (-> dep :coord :extension)]
+                      (xml/element :type {} extension))
                     (when-let [exclusions (-> dep :coord :exclusions)]
                       (xml/element :exclusions {} (map exclusion-element exclusions))))))
 
