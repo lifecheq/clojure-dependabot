@@ -1,0 +1,60 @@
+---
+name: "CI"
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+  # The previous incarnation of this action broke when its base image went end
+  # of life, and nothing noticed for two weeks because the only consumer runs
+  # on a nightly cron nobody reads. Build on a schedule so image rot fails here.
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+jobs:
+  ci:
+    name: CI
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Docker build
+        run: "docker build -t clojure-dependabot:ci ."
+
+      # .dockerignore keeps test/ out of the runtime image, so the tests run
+      # here rather than inside it - "docker run ... bb test:bb" could never
+      # have worked, since neither the tests nor a bb.edn working directory
+      # are present in the image.
+      - name: Install babashka
+        uses: DeLaGuardo/setup-clojure@13.4
+        with:
+          bb: latest
+
+      - name: Test
+        run: bb test:bb
+
+      - name: Check every binary the action shells out to is present
+        run: |
+          docker run --rm --entrypoint /bin/bash clojure-dependabot:ci -c '
+            set -euo pipefail
+            for cmd in bb clojure gh git lein mvn ssh-keyscan \
+                       maven-dependency-submission-linux; do
+              command -v "$cmd" > /dev/null || { echo "missing: $cmd"; exit 1; }
+            done
+            mvn -v
+            clojure --version
+            bb --version
+          '
+
+      - name: Check the pom generator loads and its deps are pinned
+        run: |
+          docker run --rm --entrypoint /bin/bash clojure-dependabot:ci -c '
+            set -euo pipefail
+            cd /usr/lib/clojure-dependabot/pom-generator
+            clojure -M -e "(require (quote pom-generator)) (println :pom-generator-ok)"
+          '

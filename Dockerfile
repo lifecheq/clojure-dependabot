@@ -1,62 +1,53 @@
-# Debian 11 (bullseye) reached end of life, so its security suite stopped
-# serving a valid Release file and the pool packages were rotated out. From
-# 2026-09-05 every build of the old clojure:lein-slim-bullseye base died at
-# "apt update", which silently froze the snapshots we submit to GitHub.
-# Bookworm is supported until 2028; JDK 21 matches what our projects build with.
-FROM clojure:temurin-21-lein-bookworm-slim
+FROM clojure:lein-trixie-slim AS base
 
 LABEL com.github.actions.name="Dependabot for Clojure projects" \
       com.github.actions.description="Run Dependabot as GitHub Action workflow in your Clojure project."
 
-# pom_generator.clj parses the EDN written by "clojure -Strace", so the CLI
-# stays pinned alongside the org.clojure/tools.deps version in deps.edn.
-ARG CLOJURE_CLI_VERSION=1.11.1.1165
-ARG MAVEN_DEPENDENCY_SUBMISSION_REF=2ecce44ccb44fd4b52f43468d3644e2d3e2b3cf2
+RUN export DEBIAN_FRONTEND=noninteractive && \
+    apt-get -qq update && \
+    apt-get -qq install -y --no-install-recommends curl git maven openssh-client
 
-# The lein base image has no Clojure CLI, so install it alongside maven (to
-# generate and inspect the pom), openssh-client (entrypoint.sh runs
-# ssh-keyscan), and gh (antq.sh opens the pull requests).
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-        ca-certificates \
-        curl \
-        git \
-        jq \
-        libmaven-dependency-plugin-java \
-        maven \
-        openssh-client && \
-    curl -fsSL -O "https://download.clojure.org/install/linux-install-${CLOJURE_CLI_VERSION}.sh" && \
-    chmod +x "linux-install-${CLOJURE_CLI_VERSION}.sh" && \
-    "./linux-install-${CLOJURE_CLI_VERSION}.sh" && \
-    rm "linux-install-${CLOJURE_CLI_VERSION}.sh" && \
-    curl -fsSL --retry 5 --retry-max-time 120 \
-        -o /usr/bin/maven-dependency-submission-linux-x64 \
-        "https://github.com/advanced-security/maven-dependency-submission-action/raw/${MAVEN_DEPENDENCY_SUBMISSION_REF}/cli/maven-dependency-submission-linux-x64" && \
-    chmod +x /usr/bin/maven-dependency-submission-linux-x64 && \
-    clojure -Ttools install-latest :lib com.github.liquidz/antq :as antq && \
-    curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
-        -o /usr/share/keyrings/githubcli-archive-keyring.gpg && \
-    chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg && \
-    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
-        > /etc/apt/sources.list.d/github-cli.list && \
-    apt-get update && \
-    apt-get install -y --no-install-recommends gh && \
-    rm -rf /var/lib/apt/lists/*
+RUN set -o pipefail && \
+    curl --retry 5 --retry-max-time 120 -sSfL https://github.com/clojure/brew-install/releases/latest/download/linux-install.sh | bash
 
-COPY local_dependency.sh /local_dependency.sh
+RUN set -o pipefail && \
+    curl --retry 5 --retry-max-time 120 -sSfL -o /usr/bin/maven-dependency-submission-linux https://github.com/advanced-security/maven-dependency-submission-action/releases/download/v5.0.0/maven-dependency-submission-action-linux && \
+    chmod 0755 /usr/bin/maven-dependency-submission-linux
 
-COPY scanner.sh /scanner.sh
+RUN set -o pipefail && \
+    curl --retry 5 --retry-max-time 120 -sSfL https://raw.githubusercontent.com/babashka/babashka/v1.12.214/install | bash
 
-COPY dependabot_alerts.sh /dependabot_alerts.sh
+RUN set -o pipefail && \
+    export DEBIAN_FRONTEND=noninteractive && \
+    curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg && \
+    chmod 0644 /usr/share/keyrings/githubcli-archive-keyring.gpg && \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list && \
+    apt-get -qq update && \
+    apt-get -qq install -y --no-install-recommends gh
 
-COPY alerts_summary.sh /alerts_summary.sh
+RUN mkdir /usr/lib/clojure-dependabot/
 
-COPY antq.sh /antq.sh
+COPY bb.edn /usr/lib/clojure-dependabot/
 
-COPY entrypoint.sh /entrypoint.sh
+COPY pom-generator/ /usr/lib/clojure-dependabot/pom-generator/
 
-COPY deps.edn pom_generator.clj /
+# Helper for dev testing. This is pointless in GitHub Actions as the runner sets a different $HOME,
+# so the things we download during the build get lost. There might be a better way to do this, like
+# at runtime doing some smart copying, the current state is "fine" for now.
+ARG PULL_DEPENDENCIES='0'
+RUN if [ "$PULL_DEPENDENCIES" = 1 ]; then \
+        cd /usr/lib/clojure-dependabot/ && \
+        bb -e '(println "tooling installed")'; \
+    fi
 
-RUN chmod +x /entrypoint.sh
+# Resolve the generator's own dependencies at build time, so the first scan
+# does not pay for them and a broken pin fails the build rather than a run.
+RUN cd /usr/lib/clojure-dependabot/pom-generator/ && \
+    clojure -P && \
+    clojure -M -e "(require 'pom-generator)"
 
-ENTRYPOINT ["/entrypoint.sh"]
+COPY clojure_dependabot.clj action.yml /usr/lib/clojure-dependabot/
+
+COPY scripts/clojure-dependabot /usr/bin/
+
+CMD ["clojure-dependabot"]
