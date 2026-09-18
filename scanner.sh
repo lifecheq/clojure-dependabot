@@ -49,7 +49,9 @@ do
 
 	mv deps.edn project.deps.edn
         cp /pom_generator.clj /deps.edn .
-        clojure -X pom-generator/generate-pom :repository \"$repo\"
+        # The inner quotes are part of the value: -X parses arguments as
+        # EDN, so the repository name has to arrive as a Clojure string.
+        clojure -X pom-generator/generate-pom :repository "\"$repo\""
 	mv project.deps.edn deps.edn
 
 	mkdir depsedn
