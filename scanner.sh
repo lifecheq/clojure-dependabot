@@ -39,7 +39,6 @@ do
         echo "GITHUB_REPOSITORY: ${GITHUB_REPOSITORY}"
         echo "GITHUB_REF: ${GITHUB_REF}"
 
-        # just a bit of hackery to get just the "utwig" out of "lifecheq/utwig"
         s="/${GITHUB_REPOSITORY}"
         repo="${s##/*/}"
 
@@ -49,7 +48,9 @@ do
 
 	mv deps.edn project.deps.edn
         cp /pom_generator.clj /deps.edn .
-        clojure -X pom-generator/generate-pom :repository \"$repo\"
+        # The inner quotes are part of the value: -X parses arguments as
+        # EDN, so the repository name has to arrive as a Clojure string.
+        clojure -X pom-generator/generate-pom :repository "\"$repo\""
 	mv project.deps.edn deps.edn
 
 	mkdir depsedn

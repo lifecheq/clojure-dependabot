@@ -2,8 +2,21 @@
 
 set -euxo pipefail
 
+# The step summary is reporting only, but entrypoint.sh runs under "set -e",
+# so a failure here used to abort the whole action before antq.sh ever ran -
+# and the snapshot submitted by scanner.sh still went through, which is how a
+# permanently red workflow went unnoticed. Degrade instead of aborting.
 dependency_tree_summary () {
-    mvn -ntp dependency:tree -Dverbose=true -DoutputFile="dependency-tree.txt"
+    if ! mvn -ntp dependency:tree -Dverbose=true -DoutputFile="dependency-tree.txt"; then
+        echo "WARNING: mvn dependency:tree failed for $INPUT_DIRECTORY$1, omitting the tree from the summary" >&2
+        {
+            echo "### $INPUT_DIRECTORY$1"
+            echo ""
+            echo "> :warning: \`mvn dependency:tree\` failed, dependency tree omitted."
+            echo ""
+        } >> "$GITHUB_STEP_SUMMARY"
+        return 0
+    fi
     if [[ "$INPUT_VERBOSE" == true ]]; then
         cat dependency-tree.txt
     fi
@@ -25,7 +38,9 @@ vulnerabilities_summary () {
     do
         IFS='|' read -r -a array_i <<< "$i" 
         cd "/${1/'pom.xml'/''}" || exit
-        dep_level=$(mvn -ntp dependency:tree -DoutputType=dot -Dincludes="${array_i[1]}" | grep -e "->" | cut -d ">" -f 2 | cut -d '"' -f 2 | cut -d ":" -f 1-2)
+        # An alert for a package that no longer shows up in the tree leaves grep
+        # with no match, and under "set -o pipefail" that would abort the run.
+        dep_level=$(mvn -ntp dependency:tree -DoutputType=dot -Dincludes="${array_i[1]}" | grep -e "->" | cut -d ">" -f 2 | cut -d '"' -f 2 | cut -d ":" -f 1-2 || true)
         IFS=' ' read -r -a dependency_level <<< "$dep_level"
         array_i+=("${dependency_level[0]}")
         table_row="| "

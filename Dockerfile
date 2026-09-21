@@ -1,24 +1,47 @@
-FROM clojure:lein-slim-bullseye
+# Debian 11 (bullseye) reached end of life, so its security suite stopped
+# serving a valid Release file and the pool packages were rotated out. From
+# 2026-09-05 every build of the old clojure:lein-slim-bullseye base died at
+# "apt update", which silently froze the snapshots we submit to GitHub.
+# Bookworm is supported until 2028; JDK 21 matches what our projects build with.
+FROM clojure:temurin-21-lein-bookworm-slim
 
 LABEL com.github.actions.name="Dependabot for Clojure projects" \
       com.github.actions.description="Run Dependabot as GitHub Action workflow in your Clojure project."
 
-# Install maven, antq, maven-dependency-submission cli 2.0.1, clojure, and gh cli
-RUN apt update && \
-    apt install maven libmaven-dependency-plugin-java curl jq git build-essential zlib1g-dev libncurses5-dev libgdbm-dev libnss3-dev libssl-dev libsqlite3-dev libreadline-dev libffi-dev libbz2-dev -y && \
-    rm -rf /var/lib/apt/lists/* && \
-    curl -O https://download.clojure.org/install/linux-install-1.11.1.1165.sh && \
-    chmod +x linux-install-1.11.1.1165.sh && \
-    ./linux-install-1.11.1.1165.sh && \
-    curl --retry 5 --retry-max-time 120 -L -o maven-dependency-submission-linux-x64 https://github.com/advanced-security/maven-dependency-submission-action/raw/2ecce44ccb44fd4b52f43468d3644e2d3e2b3cf2/cli/maven-dependency-submission-linux-x64 && \
-    chmod +x maven-dependency-submission-linux-x64 && \
-    mv maven-dependency-submission-linux-x64 /usr/bin/maven-dependency-submission-linux-x64 && \
+# pom_generator.clj parses the EDN written by "clojure -Strace", so the CLI
+# stays pinned alongside the org.clojure/tools.deps version in deps.edn.
+ARG CLOJURE_CLI_VERSION=1.11.1.1165
+ARG MAVEN_DEPENDENCY_SUBMISSION_REF=2ecce44ccb44fd4b52f43468d3644e2d3e2b3cf2
+
+# The lein base image has no Clojure CLI, so install it alongside maven (to
+# generate and inspect the pom), openssh-client (entrypoint.sh runs
+# ssh-keyscan), and gh (antq.sh opens the pull requests).
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        git \
+        jq \
+        libmaven-dependency-plugin-java \
+        maven \
+        openssh-client && \
+    curl -fsSL -O "https://download.clojure.org/install/linux-install-${CLOJURE_CLI_VERSION}.sh" && \
+    chmod +x "linux-install-${CLOJURE_CLI_VERSION}.sh" && \
+    "./linux-install-${CLOJURE_CLI_VERSION}.sh" && \
+    rm "linux-install-${CLOJURE_CLI_VERSION}.sh" && \
+    curl -fsSL --retry 5 --retry-max-time 120 \
+        -o /usr/bin/maven-dependency-submission-linux-x64 \
+        "https://github.com/advanced-security/maven-dependency-submission-action/raw/${MAVEN_DEPENDENCY_SUBMISSION_REF}/cli/maven-dependency-submission-linux-x64" && \
+    chmod +x /usr/bin/maven-dependency-submission-linux-x64 && \
     clojure -Ttools install-latest :lib com.github.liquidz/antq :as antq && \
-    curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg && \
+    curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+        -o /usr/share/keyrings/githubcli-archive-keyring.gpg && \
     chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg && \
-    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | tee /etc/apt/sources.list.d/github-cli.list > /dev/null && \
-    apt update && \
-    apt install gh -y
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+        > /etc/apt/sources.list.d/github-cli.list && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends gh && \
+    rm -rf /var/lib/apt/lists/*
 
 COPY local_dependency.sh /local_dependency.sh
 
