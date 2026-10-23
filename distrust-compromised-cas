@@ -1,0 +1,166 @@
+#!/usr/bin/env bash
+# Removes the roots behind the eMudhra intermediate CA compromise (October 2026,
+# https://we-have-a-problem.com) from the system and JDK trust stores, then
+# checks that the given clients refuse certificates from the compromised
+# intermediates.
+#
+# Usage: bin/distrust-compromised-cas [java] [curl] [node]
+#   With no arguments, checks every one of those clients that is installed.
+#
+# CI images (cimg/clojure, cimg/openjdk) shipped before the disclosure still
+# trust these roots, and the JVM does not check revocation or Certificate
+# Transparency, so a forged certificate for Maven Central, Clojars, npm or
+# GitHub would be accepted. Drop this script once the images we use ship
+# patched trust stores.
+#
+# Fails if a client still connects to a test host. A network error that is not
+# a certificate rejection only warns, so that the test site going away does
+# not break builds.
+set -euo pipefail
+
+# SHA-256 fingerprints of "AAA Certificate Services" (Comodo) and
+# "emSign ECC Root CA - G3"
+FINGERPRINTS=(
+  "D7:A7:A0:FB:5D:7E:27:31:D7:71:E9:48:4E:BC:DE:F7:1D:5F:0C:3E:0A:29:48:78:2B:C8:3E:E0:EA:69:9E:F4"
+  "86:A1:EC:BA:08:9C:4A:8D:3B:BE:27:34:C6:12:BA:34:1D:81:3E:04:3C:F9:E8:A8:62:CD:5C:57:A3:6B:BE:6B"
+)
+
+# One test host per root, served by the advisory's authors
+TEST_URLS=(
+  "https://dv-g3b-emudhra.we-have-a-problem.com/"
+  "https://dv-g3b-aaa-emudhra.we-have-a-problem.com/"
+)
+
+SUDO=""
+if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null; then
+  SUDO="sudo"
+fi
+
+distrust_system_store() {
+  # Debian and Ubuntu; also refreshes /etc/ssl/certs/java/cacerts when
+  # ca-certificates-java is installed
+  local conf=/etc/ca-certificates.conf
+  if [ ! -f "$conf" ]; then
+    echo "No $conf, leaving the system trust store alone"
+    return
+  fi
+  $SUDO sed -i \
+    -e 's|^mozilla/emSign_ECC_Root_CA_-_G3.crt|!&|' \
+    -e 's|^mozilla/Comodo_AAA_Services_root.crt|!&|' \
+    "$conf"
+  $SUDO update-ca-certificates >/dev/null
+  echo "System trust store: compromised roots deselected"
+}
+
+distrust_jdk_store() {
+  command -v java >/dev/null || return 0
+  local java_home keytool cacerts aliases
+  java_home=$(java -XshowSettings:properties -version 2>&1 | awk -F' = ' '/java.home/ {print $2}')
+  # By full path: sudo's secure_path often leaves out the JDK's bin directory
+  keytool="$java_home/bin/keytool"
+  cacerts=$(readlink -f "$java_home/lib/security/cacerts")
+  for fingerprint in "${FINGERPRINTS[@]}"; do
+    aliases=$("$keytool" -list -v -keystore "$cacerts" -storepass changeit 2>/dev/null |
+      awk -v fp="$fingerprint" '/^Alias name: / {alias = substr($0, 13)}
+                                $1 == "SHA256:" && $2 == fp {print alias}')
+    while IFS= read -r alias; do
+      [ -n "$alias" ] || continue
+      $SUDO "$keytool" -delete -alias "$alias" -keystore "$cacerts" -storepass changeit
+      echo "JDK trust store $cacerts: removed $alias"
+    done <<< "$aliases"
+  done
+  # A JRE cannot run the network check below, so also check the store itself
+  if "$keytool" -list -v -keystore "$cacerts" -storepass changeit 2>/dev/null |
+      grep -qE "SHA256: ($(IFS='|'; echo "${FINGERPRINTS[*]}"))"; then
+    echo "FAIL  JDK trust store $cacerts still has a compromised root"
+    FAILED=1
+  fi
+}
+
+FAILED=0
+
+report() {
+  local client=$1 url=$2 outcome=$3 detail=$4
+  case $outcome in
+    rejected) echo "OK    $client rejected $url ($detail)" ;;
+    connected) echo "FAIL  $client trusted $url"; FAILED=1 ;;
+    *) echo "WARN  $client could not check $url ($detail)" ;;
+  esac
+}
+
+check_curl() {
+  local url=$1 code=0
+  curl -sS -o /dev/null --max-time 15 "$url" 2>/dev/null || code=$?
+  case $code in
+    0) report curl "$url" connected "" ;;
+    60) report curl "$url" rejected "exit 60" ;;
+    *) report curl "$url" unknown "exit $code" ;;
+  esac
+}
+
+check_java() {
+  local url=$1 dir result
+  dir=$(mktemp -d)
+  cat > "$dir/Probe.java" <<'EOF'
+public class Probe {
+  public static void main(String[] args) throws Exception {
+    var conn = (javax.net.ssl.HttpsURLConnection) java.net.URI.create(args[0]).toURL().openConnection();
+    conn.setConnectTimeout(15000);
+    conn.setReadTimeout(15000);
+    try {
+      conn.getResponseCode();
+      System.out.println("connected");
+    } catch (javax.net.ssl.SSLHandshakeException e) {
+      System.out.println("rejected " + e.getMessage());
+    } catch (java.io.IOException e) {
+      System.out.println("unknown " + e);
+    }
+  }
+}
+EOF
+  result=$(java "$dir/Probe.java" "$url" 2>&1 | tail -1) || true
+  rm -rf "$dir"
+  case $result in
+    connected*|rejected*|unknown*) ;;
+    # A JRE has no compiler, so it cannot run a source file
+    *) result="unknown java cannot run the probe: $result" ;;
+  esac
+  report java "$url" "${result%% *}" "${result#* }"
+}
+
+check_node() {
+  local url=$1 result
+  result=$(node -e '
+    const certErrors = ["UNABLE_TO_GET_ISSUER_CERT_LOCALLY", "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+                        "SELF_SIGNED_CERT_IN_CHAIN", "CERT_UNTRUSTED", "CERT_REVOKED"];
+    require("https").get(process.argv[1], {timeout: 15000}, () => console.log("connected"))
+      .on("timeout", function () { this.destroy(new Error("timeout")); })
+      .on("error", (e) => console.log((certErrors.includes(e.code) ? "rejected " : "unknown ") + (e.code || e.message)));
+  ' "$url")
+  report node "$url" "${result%% *}" "${result#* }"
+}
+
+distrust_system_store
+distrust_jdk_store
+
+clients=("$@")
+if [ ${#clients[@]} -eq 0 ]; then
+  for client in java curl node; do
+    if command -v "$client" >/dev/null; then clients+=("$client"); fi
+  done
+fi
+
+for client in "${clients[@]}"; do
+  if ! command -v "$client" >/dev/null; then
+    echo "SKIP  $client is not installed"
+    continue
+  fi
+  for url in "${TEST_URLS[@]}"; do
+    "check_$client" "$url"
+  done
+done
+
+if [ "$FAILED" -ne 0 ]; then
+  echo "A client still trusts the compromised eMudhra intermediates, see above"
+  exit 1
+fi

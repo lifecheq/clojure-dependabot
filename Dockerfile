@@ -13,6 +13,12 @@ LABEL com.github.actions.name="Dependabot for Clojure projects" \
 ARG CLOJURE_CLI_VERSION=1.11.1.1165
 ARG MAVEN_DEPENDENCY_SUBMISSION_REF=2ecce44ccb44fd4b52f43468d3644e2d3e2b3cf2
 
+# The base image's JDK still trusts the roots behind the eMudhra intermediate CA
+# compromise (https://we-have-a-problem.com). The RUN below removes them before
+# downloading anything, and fails the build if java or curl still trust them.
+# Drop once the base image ships without them.
+COPY distrust-compromised-cas /usr/local/bin/distrust-compromised-cas
+
 # The lein base image has no Clojure CLI, so install it alongside maven (to
 # generate and inspect the pom), openssh-client (entrypoint.sh runs
 # ssh-keyscan), and gh (antq.sh opens the pull requests).
@@ -25,6 +31,7 @@ RUN apt-get update && \
         libmaven-dependency-plugin-java \
         maven \
         openssh-client && \
+    distrust-compromised-cas java curl && \
     curl -fsSL -O "https://download.clojure.org/install/linux-install-${CLOJURE_CLI_VERSION}.sh" && \
     chmod +x "linux-install-${CLOJURE_CLI_VERSION}.sh" && \
     "./linux-install-${CLOJURE_CLI_VERSION}.sh" && \
